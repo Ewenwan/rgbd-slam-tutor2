@@ -354,9 +354,20 @@ find_package( OpenCV REQUIRED )
 find_package( Eigen3 REQUIRED )
 find_package( PCL 1.7 REQUIRED )
 
-include_directories(${PCL_INCLUDE_DIRS})# 包含
+include_directories(
+${PCL_INCLUDE_DIRS}
+${PROJECT_SOURCE_DIR}/
+)# 包含
+
 link_directories(${PCL_LIBRARY_DIRS})# 链接
 add_definitions(${PCL_DEFINITIONS})# 定义
+
+set( thirdparty_libs
+    ${OpenCV_LIBS}
+    ${PCL_LIBRARY_DIRS}
+    ${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
+)
+
 
 # 二进制文件输出到bin  可执行文件 EXECUTABLE 
 set( EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin )
@@ -813,10 +824,57 @@ void FrameReader::init_tum( )
 ```
 
 > 测试FrameReader
+    
+    现在我们来测试一下之前写的FrameReader。在experiment中添加一个reading_frame.cpp文件，测试文件是否正确读取。
+    experiment/reading_frame.cpp
+```c
+
+#include "rgbdframe.h"
+
+using namespace rgbd_tutor; // 命名空间
+int main()
+{
+    ParameterReader para;
+    FrameReader     fr(para);//参数读取类初始化 帧读取类 ==============
+    while( RGBDFrame::Ptr frame = fr.next() ) // 读取
+    {
+        cv::imshow( "image", frame->rgb ); // 显示rgb
+        cv::waitKey(1);
+    }
+
+    return 0;
+}
+
+```
 
 
+> 编译
 
+    我们把rgbdframe.cpp编译成了库，然后把reading_frame链接到了这个库上。
+    由于在RGBDFrame类中用到了DBoW库的代码，所以我们先去编译一下DBoW这个库。
+    
+    cd Thirdparty/DBoW2
+    mkdir build lib
+    cd build
+    cmake ..
+    make -j4
+    这样就把DBoW编译好了。这个库以后我们要在回环检测中用到。
+    
+src/目录下的CMakeLists.txt：
 
+    add_library( rgbd_tutor  # 编译成依赖库
+         rgbdframe.cpp
+     )
+experiment下的CMakeLists.txt
+
+    add_executable( helloslam helloslam.cpp )
+    
+    # 测试 帧读取类=======================
+    add_executable( reading_frame reading_frame.cpp )
+    target_link_libraries( reading_frame rgbd_tutor ${thirdparty_libs} )  # 需要依赖 src生成的库
+    
+    编译后在bin/下面生成reading_frame程序，可以直接运行。
+    随后我们要把特征提取、匹配和跟踪都加进去，但是希望它仍能保持在正常的视频速度。
 
 
 
