@@ -381,4 +381,444 @@ add_executable( helloslam helloslam.cpp )
 
 ```
 
+# 参数文件读取类
+    yaml太麻烦了
+    方便调试程序，而不用重新编译
+
+> 示例 参数文件 
+```
+# 这是一个参数文件
+# 这虽然只是个参数文件，但是是很厉害的呢！
+# 去你妹的yaml! 我再也不用yaml了！简简单单多好！
+
+# 数据相关
+# 起始索引
+start_index=1
+# 数据所在目录
+data_source=/home/xiang/Documents/data/rgbd_dataset_freiburg1_room/
+
+# 相机内参
+
+camera.cx=318.6
+camera.cy=255.3
+camera.fx=517.3
+camera.fy=516.5
+camera.scale=5000.0
+camera.d0=0.2624
+camera.d1=-0.9531
+camera.d2=-0.0054
+camera.d3=0.0026
+camera.d4=1.1633
+
+```
+    语法很简单，以行为单位，以#开头至末尾的都是注释。
+    参数的名称与值用等号相连，即 名称＝值 ，很容易吧！
+    下面我们做一个ParameterReader类，来读取这个文件。
+> 常用头文件 和结构体 文件
+    在此之前，先新建一个 include/common.h 文件，
+    把一些常用的头文件和结构体放到此文件中，
+    省得以后写代码前面100行都是#include。
+```c
+#ifndef COMMON_H
+#define COMMON_H
+
+/**
+ * common.h
+ * 定义一些常用的结构体
+ * 以及各种可能用到的头文件，放在一起方便include
+ */
+
+// C++标准库=========
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <map>
+#include <string>
+using namespace std;
+
+
+// Eigen=============
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
+// OpenCV=============
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/calib3d/calib3d.hpp>
+
+// boost==============
+#include <boost/format.hpp>
+#include <boost/timer.hpp>
+#include <boost/lexical_cast.hpp>// boost 的 lexical_cast 能把字符串转成各种 c++ 内置类型
+
+// pcl ===
+// g2o ===
+
+namespace rgbd_tutor  // 命名空间 自己定义===============
+{
+
+// 相机内参模型
+// 增加了畸变参数，虽然可能不会用到
+struct CAMERA_INTRINSIC_PARAMETERS
+{
+    // 标准内参
+    double cx=0, cy=0, fx=0, fy=0, scale=0;
+    // 畸变因子
+    double d0=0, d1=0, d2=0, d3=0, d4=0;
+};
+
+
+
+// linux终端的颜色输出
+#define RESET "\033[0m"
+#define BLACK "\033[30m" /* Black */
+#define RED "\033[31m" /* Red */
+#define GREEN "\033[32m" /* Green */
+#define YELLOW "\033[33m" /* Yellow */
+#define BLUE "\033[34m" /* Blue */
+#define MAGENTA "\033[35m" /* Magenta */
+#define CYAN "\033[36m" /* Cyan */
+#define WHITE "\033[37m" /* White */
+#define BOLDBLACK "\033[1m\033[30m" /* Bold Black */
+#define BOLDRED "\033[1m\033[31m" /* Bold Red */
+#define BOLDGREEN "\033[1m\033[32m" /* Bold Green */
+#define BOLDYELLOW "\033[1m\033[33m" /* Bold Yellow */
+#define BOLDBLUE "\033[1m\033[34m" /* Bold Blue */
+#define BOLDMAGENTA "\033[1m\033[35m" /* Bold Magenta */
+#define BOLDCYAN "\033[1m\033[36m" /* Bold Cyan */
+#define BOLDWHITE "\033[1m\033[37m" /* Bold White */
+
+
+}
+
+#endif // COMMON_H
+
+// 请注意我们使用rgbd_tutor作为命名空间，以后所有类都位于这个空间里。
+// 然后，文件里还定义了相机内参的结构，这个结构我们之后会用到，先放在这儿。
+
+```
+> 参数读取类 头文件 parameter_reader.h
+```c
+/*
+文件名：parameter_reader.h
+功能:  参数读取类
+说明:
+为保持简单，我把实现也放到了类中。
+该类的构造函数里，传入参数文件所在的路径。
+在我们的代码里，parameters.txt位于代码根目录下。
+不过，如果找不到文件，我们也会在上一级目录中寻找一下，
+这是由于qtcreator在运行程序时默认使用程序所在的目录（./bin）而造成的。
+
+　　ParameterReader 实际存储的数据都是std::string类型（字符串），
+    在需要转换为其他类型时，我们用 boost::lexical_cast 进行转换。
+
+　　ParameterReader::getData 函数返回一个参数的值。
+ 
+   它有一个模板参数，你可以这样使用它：
+　　double d = parameterReader.getData<double>("d");
+　　如果找不到参数，则返回一个空值。
+　　最后，我们还用了一个函数返回相机的内参，这纯粹是为了外部类调用更方便。
+  
+*/
+#ifndef PARAMETER_READER_H
+#define PARAMETER_READER_H
+
+#include "common.h"
+
+namespace rgbd_tutor
+{
+
+class ParameterReader
+{
+public:
+    // 构造函数：传入参数文件的路径
+    ParameterReader( const string& filename = "./parameters.txt" )
+    {
+        ifstream fin( filename.c_str() );
+        if (!fin)
+        {
+            // 看看上级目录是否有这个文件 ../parameter.txt
+            fin.open("."+filename);
+            if (!fin)
+            {
+                cerr<<"没有找到对应的参数文件："<<filename<<endl;
+                return;
+            }
+        }
+
+        // 从参数文件中读取信息
+        while(!fin.eof()) // 直到末尾
+        {
+            string str;
+            getline( fin, str );
+            if (str[0] == '#') // 跳过 # 开头的
+            {
+                // 以‘＃’开头的是注释
+                continue;
+            }
+            
+            int pos = str.find('#'); // 其余的行中 #到末尾都是注释========
+            if (pos != -1)
+            {
+                // 从井号到末尾的都是注释
+                str = str.substr(0, pos); // 0开始到#号前才是 参数内容====
+            }
+
+            // 查找等号==========================
+            pos = str.find("=");
+            if (pos == -1)
+                continue;//未找打=
+            // 等号左边是key，右边是value===========
+            string key = str.substr( 0, pos );// 左边
+            string value = str.substr( pos+1, str.length() );// 右边
+            data[key] = value; // 字典类
+
+            if ( !fin.good() )
+                break;
+        }
+    }
+
+    // 获取数据
+    // 由于数据类型不确定，写成模板===========================
+    template< class T >
+    T getData( const string& key ) const
+    {
+        auto iter = data.find(key);
+        if (iter == data.end())
+        {
+            cerr<<"Parameter name "<<key<<" not found!"<<endl;
+            return boost::lexical_cast<T>( "" );
+        }
+        
+        // boost 的 lexical_cast 能把字符串转成各种 c++ 内置类型==========
+        return boost::lexical_cast<T>( iter->second );
+    }
+
+    // 直接返回读取到的相机内参===========================================
+    rgbd_tutor::CAMERA_INTRINSIC_PARAMETERS getCamera() const
+    {
+        static rgbd_tutor::CAMERA_INTRINSIC_PARAMETERS camera;
+        camera.fx = this->getData<double>("camera.fx");
+        camera.fy = this->getData<double>("camera.fy");
+        camera.cx = this->getData<double>("camera.cx");
+        camera.cy = this->getData<double>("camera.cy");
+        camera.d0 = this->getData<double>("camera.d0");
+        camera.d1 = this->getData<double>("camera.d1");
+        camera.d2 = this->getData<double>("camera.d2");
+        camera.d3 = this->getData<double>("camera.d3");
+        camera.d4 = this->getData<double>("camera.d4");
+        camera.scale = this->getData<double>("camera.scale");
+        return camera;
+    }
+
+protected:
+    map<string, string> data;
+};
+
+};
+
+#endif // PARAMETER_READER_H
+
+```
+
+
+# RGBD相机帧类  include/rgbdframe.h  数据类 读取类(数据集)
+    程序运行的基本单位是Frame，而我们从数据集中读取的数据也是以Frame为单位的。
+    现在我们来设计一个RGBDFrame类，以及向数据集读取Frame的FrameReader类。
+
+```c
+#ifndef RGBDFRAME_H
+#define RGBDFRAME_H
+
+#include "common.h"
+#include "parameter_reader.h" // 参数读取==================
+
+#include"Thirdparty/DBoW2/DBoW2/FORB.h"
+#include"Thirdparty/DBoW2/DBoW2/TemplatedVocabulary.h"
+
+namespace rgbd_tutor{
+
+//帧类===============数据结构=============================================
+class RGBDFrame
+{
+public:
+    typedef shared_ptr<RGBDFrame> Ptr;// 类 对象 共享指针，不用考虑 delet
+// 我们把这个类的指针定义成了shared_ptr，以后尽量使用这个指针管理此类的对象，这样可以免出一些变量作用域的问题。
+// 并且，智能指针可以自己去delete，不容易出现问题。
+
+public:
+    RGBDFrame() {} // 空的构造函数=============================
+    // 方法===================================================
+    // 给定像素点，使用深度数据，获取 本帧坐标系下的3D点坐标========
+    // 可以把一个像素坐标转换为当前Frame下的3D坐标。当然前提是深度图里探测到了深度点。
+    cv::Point3f project2dTo3dLocal( const int& u, const int& v  ) const
+    {
+        if (depth.data == nullptr)
+            return cv::Point3f();
+        ushort d = depth.ptr<ushort>(v)[u];// 获取v 行 u列 的向上对应的深度值================
+        if (d == 0)
+            return cv::Point3f();
+            
+        cv::Point3f p;                    // 三角测量计算3d点
+        p.z = double( d ) / camera.scale;
+        p.x = ( u - camera.cx) * p.z / camera.fx;
+        p.y = ( v - camera.cy) * p.z / camera.fy;
+        return p;
+    }
+
+public:
+    // 数据成员============================================
+    int id  =-1;            //-1表示该帧不存在
+
+    // 彩色图和深度图
+    cv::Mat rgb, depth;
+    // 该帧位姿
+    // 定义方式为：x_local = T * x_world 注意也可以反着定义； 从世界坐标系 到 当前帧坐标系======
+    Eigen::Isometry3d       T=Eigen::Isometry3d::Identity();// 初始化为 单位矩阵
+
+    // 特征
+    vector<cv::KeyPoint>    keypoints; // 关键点
+    cv::Mat                 descriptor;// 描述子
+    vector<cv::Point3f>     kps_3d;    // 2d 关键点对应的 3d点
+
+    // 相机
+    // 默认所有的帧都用一个相机模型（难道你还要用多个吗？）
+    CAMERA_INTRINSIC_PARAMETERS camera;
+
+    // BoW回环特征
+    // 讲BoW时会用到，这里先请忽略之
+    DBoW2::BowVector bowVec;// 特征 词带=====================
+
+};
+
+// FrameReader 帧数据读取类 ======================================
+// 从TUM数据集中读取数据的类   主要用于数据集====================
+class FrameReader
+{
+public:
+    FrameReader( const rgbd_tutor::ParameterReader& para )
+        : parameterReader( para )
+    {
+        init_tum( );
+    }
+
+    // 获得下一帧
+    RGBDFrame::Ptr   next();
+
+    // 重置index
+    void    reset()
+    {
+        cout<<"重置 frame reader"<<endl;
+        currentIndex = start_index;
+    }
+
+    // 根据index获得帧
+    RGBDFrame::Ptr   get( const int& index )
+    {
+        if (index < 0 || index >= rgbFiles.size() )
+            return nullptr;
+        currentIndex = index;
+        return next();
+    }
+
+protected:
+    // 初始化tum数据集
+    void    init_tum( );
+protected:
+
+    // 当前索引
+    int currentIndex =0;
+    // 起始索引
+    int start_index  =0;
+
+    const   ParameterReader&    parameterReader;
+
+    // 文件名序列
+    vector<string>  rgbFiles, depthFiles;
+
+    // 数据源
+    string  dataset_dir;
+
+    // 相机内参
+    CAMERA_INTRINSIC_PARAMETERS     camera;
+};
+
+};
+#endif // RGBDFRAME_H
+
+include/rgbdframe.h
+
+```
+> 我们在src/rgbdframe.cpp中实现init_tum()和next()这两个函数 src/rgbdframe.cpp
+
+```c
+#include "rgbdframe.h"
+#include "common.h"
+#include "parameter_reader.h"
+
+using namespace rgbd_tutor; // 命名空间=========================================
+
+RGBDFrame::Ptr   FrameReader::next()
+{
+    if (currentIndex < start_index || currentIndex >= rgbFiles.size())
+        return nullptr; // 没有这一帧
+
+    RGBDFrame::Ptr   frame (new RGBDFrame);
+    frame->id = currentIndex;
+    frame->rgb = cv::imread( dataset_dir + rgbFiles[currentIndex]); // rgb图============
+    frame->depth = cv::imread( dataset_dir + depthFiles[currentIndex], -1);// 彩色图=====
+
+    if (frame->rgb.data == nullptr || frame->depth.data==nullptr)
+    {
+        // 数据不存在
+        return nullptr;
+    }
+
+    frame->camera = this->camera;
+    currentIndex ++;
+    return frame;
+}
+
+void FrameReader::init_tum( )
+{
+    dataset_dir = parameterReader.getData<string>("data_source"); // 数据源
+    string  associate_file  =   dataset_dir+"/associate.txt";     // rgb depth 匹配数据
+    ifstream    fin(associate_file.c_str());
+    if (!fin)
+    {
+        cerr<<"找不着assciate.txt啊！在tum数据集中这尼玛是必须的啊!"<<endl;
+        cerr<<"请用python assicate.py rgb.txt depth.txt > associate.txt生成一个associate文件，再来跑这个程序！"<<endl;
+        return;
+    }
+
+    while( !fin.eof() )
+    {
+        string rgbTime, rgbFile, depthTime, depthFile;
+        fin>>rgbTime>>rgbFile>>depthTime>>depthFile;
+        if ( !fin.good() )
+        {
+            break;
+        }
+        rgbFiles.push_back( rgbFile ); // rgb 图像文件
+        depthFiles.push_back( depthFile );// depth文件
+    }
+
+    cout<<"一共找着了"<<rgbFiles.size()<<"个数据记录哦！"<<endl;
+    camera = parameterReader.getCamera(); // 相机参数
+    start_index = parameterReader.getData<int>("start_index");//起始帧id 
+    currentIndex = start_index;
+}
+
+
+```
+
+> 测试FrameReader
+
+
+
+
+
+
+
+
 
