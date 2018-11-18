@@ -287,9 +287,40 @@ ax.plot(x,y,z) # 显示3维 轨迹点
 plt.show()
 
 ```
+    把这部分代码复制存储成draw_groundtruth.py存放到数据目录中，再运行：
+    python draw_groundtruth.py
+
+![](https://images2015.cnblogs.com/blog/606958/201602/606958-20160221135949045-1772096676.png)
 
 
-    
-    
+    第二件事，因为外部那个运动捕捉装置的记录频率比较高，得到的轨迹点也比图像密集很多，如何查找每个图像的真实位置呢？
 
+    还记得associate.py不？我们可以用同样的方式来匹配associate.txt和groundtruth.txt中的时间信息哦：
+
+    python associate.py associate.txt groundtruth.txt > associate_with_groundtruth.txt
+
+    这时，我们的新文件 associate_with_groundtruth.txt 中就含有每个帧的位姿信息了：
+
+    1305031910.765238 rgb/1305031910.765238.png 1305031910.771502 depth/1305031910.771502.png 
+    1305031910.769500 -0.8683 0.6026 1.5627 0.8219 -0.3912 0.1615 -0.3811
+
+    是不是很方便呢？对于TUM中其他的序列也可以同样处理。
+
+关于TUM中的相机
+
+    TUM数据集一共用了三个机器人，记成fr1, fr2, fr3。
+    这三台相机的参数在这里： 
+
+    http://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats#intrinsic_camera_calibration_of_the_kinect
+
+    数据当中，深度图已经根据内参向RGB作了调整。所以相机内参以RGB为主：
+    Camera          fx      fy      cx    cy    d0      d1      d2      d3      d4
+    (ROS default)   525.0  525.0  319.5  239.5 0.0      0.0     0.0     0.0     0.0
+    Freiburg 1 RGB  517.3  516.5  318.6  255.3 0.2624  -0.9531  -0.0054 0.0026  1.1633
+    Freiburg 2 RGB  520.9  521.0  325.1  249.7 0.23 12 -0.7849  -0.0033 -0.0001  0.9172
+    Freiburg 3 RGB  535.4  539.2  320.1  247.6 0          0      0       0      0
+
+    深度相机的scale为5000（和kinect默认的1000是不同的）。也就是depth/中图像像素值5000为真实世界中的一米。
+  
+  
     
