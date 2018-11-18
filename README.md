@@ -337,6 +337,7 @@ plt.show()
 
 # cmakelists.txt
 ```c
+# 主文件 cmakelists.txt=========================
 cmake_minimum_required( VERSION 2.8 )# 版本要求
 project( rgbd-slam-tutor2 )# 项目名称
 
@@ -370,9 +371,14 @@ include_directories(
 # 源文件目录
 add_subdirectory( ${PROJECT_SOURCE_DIR}/src/ )
 add_subdirectory( ${PROJECT_SOURCE_DIR}/experiment/ )
-
-
 ```
 
+> 次级 cmakelists.txt 文件 src/CMakeLists.txt experiment/CMakeLists.txt
+```c
+# 直接添加需要编译的文件
+# 修改experiment/CMakeLists.txt文件，告诉它我们要编译这个文件：
+add_executable( helloslam helloslam.cpp )
+
+```
 
 
