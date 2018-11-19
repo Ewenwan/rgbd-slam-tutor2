@@ -2472,5 +2472,174 @@ void PoseGraph::mainLoop()
 
 ```
 
+# 地图构建
+> mapper.h
+```
+#ifndef MAPPER_H
+#define MAPPER_H
+
+#include "common_headers.h"
+#include "rgbdframe.h"
+#include "pose_graph.h"
+
+#include <pcl/common/transforms.h>
+#include <pcl/point_types.h>
+
+namespace rgbd_tutor
+{
+using namespace rgbd_tutor;
+
+class Mapper
+{
+public:
+    typedef pcl::PointXYZRGBA PointT; // 点
+    typedef pcl::PointCloud<PointT> PointCloud; // 点云
+
+    Mapper( const ParameterReader& para, PoseGraph& graph )
+        : parameterReader( para ), poseGraph( graph )
+    {
+        resolution = para.getData<double>("mapper_resolution");   // 点云精度
+        max_distance = para.getData<double>("mapper_max_distance");// 
+
+        viewerThread = make_shared<thread> ( bind( &Mapper::viewer, this ));// 可视化线程======
+    }
+    void shutdown()
+    {
+        shutdownFlag = true;
+        viewerThread->join();// 等待 可视化线程结束
+    }
+
+    // viewer线程
+    void viewer();
+
+protected:
+    PointCloud::Ptr generatePointCloud( const RGBDFrame::Ptr& frame );// 生成点云========
+
+protected:
+    // viewer thread
+    shared_ptr<thread>		viewerThread = nullptr;// 可视化线程指针=====
+    const ParameterReader& parameterReader;
+    PoseGraph&  poseGraph;// 图优化
+    
+    // 设置默认值
+    int    keyframe_size    = 0;
+    double resolution       = 0.02;
+    double max_distance     = 8.0;
+    bool	shutdownFlag	= false;
+
+};
 
 
+}
+
+#endif // MAPPER_H
+
+```
+
+> mapper.c
+
+```c
+#include "mapper.h"
+
+#include <pcl/visualization/cloud_viewer.h>
+#include <pcl/filters/voxel_grid.h>// 体素格滤波======
+
+using namespace rgbd_tutor;
+
+Mapper::PointCloud::Ptr Mapper::generatePointCloud(const RGBDFrame::Ptr &frame)
+{
+    PointCloud::Ptr tmp( new PointCloud() );
+    if ( frame->pointcloud == nullptr )
+    {
+        // point cloud is null ptr
+        frame->pointcloud = boost::make_shared<PointCloud>();
+
+
+// omp 多线程 并行处理 生成点云=================================!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#pragma omp parallel for
+        for ( int m=0; m<frame->depth.rows; m+=3 ) // 间隔3行生成点云=========
+        {
+            for ( int n=0; n<frame->depth.cols; n+=3 )
+            {
+                ushort d = frame->depth.ptr<ushort>(m)[n];// 深度值
+                if (d == 0)
+                    continue;
+                if (d > max_distance * frame->camera.scale)// 深度值过大 不可靠
+                    continue;
+                PointT p;
+                cv::Point3f p_cv = frame->project2dTo3d(n, m);// 2d点投影成3d点
+                p.b = frame->rgb.ptr<uchar>(m)[n*3];
+                p.g = frame->rgb.ptr<uchar>(m)[n*3+1];
+                p.r = frame->rgb.ptr<uchar>(m)[n*3+2];
+
+                p.x = p_cv.x;
+                p.y = p_cv.y;
+                p.z = p_cv.z;
+
+                frame->pointcloud->points.push_back( p );
+            }
+        }
+    }
+
+    Eigen::Isometry3d T = frame->getTransform().inverse();
+    pcl::transformPointCloud( *frame->pointcloud, *tmp, T.matrix());// 当前帧点云转换到 世界坐标系下
+    tmp->is_dense = false;// 非稠密点云，有nan值
+    return tmp;
+}
+
+
+// 可视化线程执行的函数======================================
+void Mapper::viewer()
+{
+    pcl::visualization::CloudViewer viewer("viewer");
+    PointCloud::Ptr globalMap (new PointCloud);
+    
+// 体素格滤波参数==============================
+    pcl::VoxelGrid<PointT>	voxel;
+    voxel.setLeafSize( resolution, resolution, resolution );
+
+    while (shutdownFlag == false)
+    {
+        static int cntGlobalUpdate = 0;
+        if ( poseGraph.keyframes.size() <= this->keyframe_size )
+        {
+            usleep(1000); // 图优化线程  慢了 等待 ===========================
+            continue;
+        }
+        // keyframe is updated
+        PointCloud::Ptr	tmp(new PointCloud());
+        if (cntGlobalUpdate % 15 == 0) // 每隔15 次 更新地图
+        {
+            // update all frames
+            cout<<"redrawing frames"<<endl;
+            globalMap->clear();// 地图清空===============
+            for ( int i=0; i<poseGraph.keyframes.size(); i+=2 )// 间隔两帧生成点云地图============
+            {
+                PointCloud::Ptr cloud = this->generatePointCloud(poseGraph.keyframes[i]);
+                *globalMap += *cloud;
+            }
+        }
+        else
+        {
+            for ( int i=poseGraph.keyframes.size()-1; i>=0 && i>poseGraph.keyframes.size()-6; i-- )// 最近5帧点云加入到地图=====
+            {
+                PointCloud::Ptr cloud = this->generatePointCloud(poseGraph.keyframes[i]);
+                *globalMap += *cloud;
+            }
+        }
+
+        cntGlobalUpdate ++ ;
+        //voxel
+        voxel.setInputCloud( globalMap );
+        voxel.filter( *tmp );
+
+        keyframe_size = poseGraph.keyframes.size(); // 更新 关键帧数量
+        globalMap->swap( *tmp ); // 滤波
+        viewer.showCloud( globalMap );
+
+        cout<<"points in global map: "<<globalMap->points.size()<<endl;
+    }
+}
+
+
+```
