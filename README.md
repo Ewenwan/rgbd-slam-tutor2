@@ -2206,7 +2206,7 @@ public:
 
 ```
 
-> 回环优化 全局优化 实现
+> 回环优化 全局优化 实现 pose_graph.c
 
 ```c
 #include "pose_graph.h"
@@ -2217,27 +2217,32 @@ using namespace rgbd_tutor;
  * @brief PoseGraph::tryInsertKeyFrame
  * @param frame
  * @return
- * TODO: Problem: when inserting large number of keyframes, the mapping thread will block for long time, causing even more key-frames to be processed.
+ * TODO: Problem: when inserting large number of keyframes,
+                  the mapping thread will block for long time, 
+		  causing even more key-frames to be processed.
  */
+ 
+// 试图插入一个新的keyframe，失败返回false====================
 bool PoseGraph::tryInsertKeyFrame(RGBDFrame::Ptr& frame)
 {
     if ( keyframes.size() == 0 )
     {
         // 图是空的，直接加入原始点
-        unique_lock<mutex> lck(keyframes_mutex);
-        keyframes.push_back(frame);
-        refFrame = frame;
-        g2o::VertexSE3* v = new g2o::VertexSE3();
-        v->setId( frame->id );
-        v->setEstimate( frame->T_f_w.inverse() );
-        v->setFixed(true);
-        optimizer.addVertex( v );
-        vertexIdx.push_back( frame->id );
+        unique_lock<mutex> lck(keyframes_mutex);// 关键帧 上锁
+        keyframes.push_back(frame);// 加入 关键帧队列
+        refFrame = frame;          // 设置为参考帧
+        g2o::VertexSE3* v = new g2o::VertexSE3();// 新顶点
+        v->setId( frame->id );                   // 顶点id
+        v->setEstimate( frame->T_f_w.inverse() );// 估计值
+        v->setFixed(true);                       // 第一帧位姿 固定 
+        optimizer.addVertex( v );                // 优化器中加入顶点
+        vertexIdx.push_back( frame->id );        // 顶点 集合 记录
         return true;
     }
 
     // 计算 frame 和 refFrame 之间的位移差
-    Eigen::Isometry3d delta = frame->getTransform().inverse() * refFrame->getTransform();
+    Eigen::Isometry3d delta = frame->getTransform().inverse() * refFrame->getTransform();// 当前帧和参考帧 位姿
+    // 位姿变化足够大，才加入 关键帧====================================
     if ( norm_translate( delta ) > keyframe_min_translation ||
          norm_rotate( delta ) > keyframe_min_rotation )
     {
@@ -2245,14 +2250,14 @@ bool PoseGraph::tryInsertKeyFrame(RGBDFrame::Ptr& frame)
         // 在key frames中进行插入，并在图中生成对应节点和边
         unique_lock<mutex> lck(keyframes_mutex);
         cout<<YELLOW<<"adding keyframe "<<frame->id<<" with ref to "<<refFrame->id<<", n_t="<<norm_translate( delta )<<",n_r="<<norm_rotate(delta)<<RESET<<endl;
-        newFrames.push_back( frame );
+        newFrames.push_back( frame );// 新关键帧 序列=================
         
         //  add the vertex
-        g2o::VertexSE3* v = new g2o::VertexSE3();
-        v->setId( frame->id );
-        v->setEstimate( frame->getTransform().inverse() );
-        v->setFixed(false);
-        optimizer.addVertex( v );
+        g2o::VertexSE3* v = new g2o::VertexSE3();// 新顶点
+        v->setId( frame->id );                   // 顶点id
+        v->setEstimate( frame->getTransform().inverse() );// 估计值
+        v->setFixed(false);                               // 进行优化
+        optimizer.addVertex( v );                         // 优化器中加入顶点
         vertexIdx.push_back( frame->id );
         keyframes.push_back( frame );
 
