@@ -1101,7 +1101,7 @@ vector<cv::DMatch> OrbFeature::match( const RGBDFrame::Ptr& frame1,
 ```
 
 
-#  数据匹配 2d-3d pnp 求解类  直接 G2O优化求解???
+#  数据匹配 2d-3d pnp 求解类  直接 G2O优化求解 
 > include/pnp.h
 
 ```c
@@ -1361,6 +1361,70 @@ bool rgbd_tutor::PnPSolver::solvePnPLazy( const rgbd_tutor::RGBDFrame::Ptr & fra
     }
     return true;
 
+}
+
+
+```
+
+> pnp 求解类  测试代码
+
+```c
+#include "pnp.h"
+#include "common_headers.h"
+
+using namespace std;
+using namespace rgbd_tutor;
+
+int main()
+{
+    cout<<"running test pnp"<<endl;
+    ParameterReader para;
+    FrameReader frameReader( para );
+    OrbFeature  orb(para);
+    PnPSolver   pnp(para, orb);
+
+    RGBDFrame::Ptr refFrame = frameReader.next();
+    orb.detectFeatures( refFrame );// 特征点检测
+    Eigen::Isometry3d   speed = Eigen::Isometry3d::Identity(); // 开始的速度
+
+    while (1)
+    {
+        cout<<"*************************************"<<endl;
+        boost::timer timer;
+        RGBDFrame::Ptr currFrame = frameReader.next();// 当前帧====
+
+        if ( currFrame == nullptr )
+        {
+            break;
+        }
+        currFrame->T_f_w = speed * refFrame->T_f_w ;// 安照横速模型设置 当前帧 位姿 的初始值
+        orb.detectFeatures( currFrame );
+
+        PNP_INFORMATION info;
+        bool result = pnp.solvePnPLazy( refFrame, currFrame, info, true );// 和参考帧 pnp 2d-3d G2O求解
+
+        if ( result == false )
+        {
+            cout<<"pnp failed"<<endl;
+            refFrame = currFrame;
+            cv::waitKey(0);
+        }
+        else
+        {
+            currFrame->T_f_w = info.T * refFrame->T_f_w; // 利用优化结果更新 当前帧
+            cout<<"result.T="<<endl;
+            cout<<info.T.matrix()<<endl;
+            cout<<"current = "<< endl << currFrame->T_f_w.matrix() << endl;
+            speed = info.T;
+            refFrame = currFrame; // 当前帧 更新为 参考帧==========
+            cv::waitKey(1);
+        }
+
+        cout<<GREEN<<"time used = "<<timer.elapsed()<<RESET<<endl;
+
+    }
+
+    return 0;
 }
 
 
@@ -1634,10 +1698,52 @@ void    Tracker::lostRecover()
     cout<<"recover returned"<<endl;
 }
 
+```
 
+
+> 跟踪线程测试代码
+```c
+#include "common_headers.h"
+#include "rgbdframe.h"
+#include "track.h"
+
+using namespace std;
+using namespace rgbd_tutor;
+
+int main()
+{
+    cout<<"running tracker..."<<endl;
+    ParameterReader para;
+    FrameReader frameReader( para );
+    Tracker tracker(para);
+
+    while ( RGBDFrame::Ptr frame = frameReader.next() ) // 下一帧=======
+    {
+        cout<<"*************************************"<<endl;
+        cout<<"tracking frame "<<frame->id<<endl;
+        boost::timer    timer;
+        Eigen::Isometry3d T = tracker.updateFrame( frame );// 当前帧跟踪参考帧
+        cout<<"current T="<<endl<<T.matrix()<<endl;
+        cv::imshow( "image", frame->rgb );
+        if (tracker.getState() == Tracker::LOST)
+        {
+            cout<<"The tracker has lost"<<endl;
+            cv::waitKey(0);
+        }
+        else
+        {
+            cv::waitKey(1);
+        }
+        cout<<"time cost = "<<timer.elapsed()<<endl;
+    }
+    return 0;
+}
 
 ```
-# 闭环检测
+
+
+
+# 闭环检测 Looper.h
 
 ```c
 #ifndef LOOPER_H
@@ -1677,7 +1783,7 @@ public:
         min_interval = para.getData<int>("looper_min_interval");
     }
 
-    // 往数据库里增加一条frame记录
+    // 往闭环数据库里增加一条frame记录=======================================
     void add( RGBDFrame::Ptr& frame )
     {
         vector<cv::Mat> desps = frame->getAllDescriptorsVec(); // 输入帧的描述子
@@ -1708,277 +1814,28 @@ protected:
 
 ```
 
-> 闭环检测实现
+> 闭环检测实现 Looper.c
 ```c
 #include "looper.h"
 
-using namespace rgbd_tutor;#include "pose_graph.h"
-#include "utils.h"
 using namespace rgbd_tutor;
-
-/**
- * @brief PoseGraph::tryInsertKeyFrame
- * @param frame
- * @return
- * TODO: Problem: when inserting large number of keyframes, the mapping thread will block for long time, causing even more key-frames to be processed.
- */
-bool PoseGraph::tryInsertKeyFrame(RGBDFrame::Ptr& frame)
-{
-    if ( keyframes.size() == 0 )
-    {
-        // 图是空的，直接加入原始点
-        unique_lock<mutex> lck(keyframes_mutex);
-        keyframes.push_back(frame);
-        refFrame = frame;
-        g2o::VertexSE3* v = new g2o::VertexSE3();
-        v->setId( frame->id );
-        v->setEstimate( frame->T_f_w.inverse() );
-        v->setFixed(true);
-        optimizer.addVertex( v );
-        vertexIdx.push_back( frame->id );
-        return true;
-    }
-
-    // 计算 frame 和 refFrame 之间的位移差
-    Eigen::Isometry3d delta = frame->getTransform().inverse() * refFrame->getTransform();
-    if ( norm_translate( delta ) > keyframe_min_translation ||
-         norm_rotate( delta ) > keyframe_min_rotation )
-    {
-        // 离keyframe够远
-        // 在key frames中进行插入，并在图中生成对应节点和边
-        unique_lock<mutex> lck(keyframes_mutex);
-        cout<<YELLOW<<"adding keyframe "<<frame->id<<" with ref to "<<refFrame->id<<", n_t="<<norm_translate( delta )<<",n_r="<<norm_rotate(delta)<<RESET<<endl;
-        newFrames.push_back( frame );
-        
-        //  add the vertex
-        g2o::VertexSE3* v = new g2o::VertexSE3();
-        v->setId( frame->id );
-        v->setEstimate( frame->getTransform().inverse() );
-        v->setFixed(false);
-        optimizer.addVertex( v );
-        vertexIdx.push_back( frame->id );
-        keyframes.push_back( frame );
-
-        // and the edge with refframe
-        // 这里直接根据refFrame和currentFrame的位姿差生成一个边
-        // 因为位姿差是tracker估计出来的，我们认为这是比较准的
-        g2o::EdgeSE3* edge = new g2o::EdgeSE3();
-        // 注意边的赋值有些绕，详见EdgeSE3的误差计算方式
-        g2o::VertexSE3* v0 = dynamic_cast<g2o::VertexSE3*> (optimizer.vertex( refFrame->id ));
-        g2o::VertexSE3* v1 = dynamic_cast<g2o::VertexSE3*> (optimizer.vertex( frame->id ));
-        edge->setVertex(0, v1);
-        edge->setVertex(1, v0);
-        // because the state is estimated from tracker
-        edge->setMeasurementFromState();
-        edge->setInformation( Eigen::Matrix<double,6,6>::Identity() * 100);
-        edge->setRobustKernel( new g2o::RobustKernelHuber() );
-
-        EdgeID id;
-        id[refFrame->id] = frame->id;
-        edges[ id ] = edge;
-        optimizer.addEdge( edge );
-        
-        // set ref frame to current
-        refFrame = frame;
-
-        keyframe_updated.notify_one();
-        return true;
-    }
-    else
-    {
-        return false;
-    }
-}
-
-/**
- * @brief PoseGraph::mainLoop
- */
-void PoseGraph::mainLoop()
-{
-    cout<<"starting pose graph thread..."<<endl;
-    double  loopAccumulatedError = 0.0; //回环的累积误差
-    double  localAccumulatedError = 0.0; //回环的累积误差
-    while(1)
-    {
-        if (shutDownFlag == true)
-        {
-            break;
-        }
-        unique_lock<mutex> lck_update_keyframe(keyframe_updated_mutex);
-        keyframe_updated.wait( lck_update_keyframe );    //等到keyframes有更新
-        cout<<"keyframes are updated"<<endl;
-        boost::timer timer;
-        // 复制一份newFrames，防止处理的时候有新的东西插入
-        unique_lock<mutex> lck(keyframes_mutex);
-        vector<RGBDFrame::Ptr>  newFrames_copy = newFrames;
-        newFrames.clear();
-        
-
-        bool    findLargeLoop = false;
-        // 检测新增的keyframe并检测其中的回环
-        // 边
-        cout<<"new key frames = "<<newFrames_copy.size()<<endl;
-        
-        for ( auto nf : newFrames_copy )
-        {
-            // 检测nf和keyframes末尾几个的关系
-            // 请注意 事实上neframes里的东西已经出现在keyframes里边了
-            for ( int i=0; i<nearbyFrames; i++ )
-            {
-                int idx = keyframes.size()-i-2;
-                if (idx < 0)
-                {
-                    break;
-                }
-                RGBDFrame::Ptr pf = keyframes[idx];
-                //cout<<"checking "<<nf->id<<" and "<<pf->id<<endl;
-                //  检测边是否存在
-                if (isEdgeExist( nf->id, pf->id ))
-                {
-                    continue;
-                }
-
-                // 用pnp检测nf和pf之间是否可以计算一个边
-                PNP_INFORMATION info;
-                if ( pnp->solvePnPLazy( pf, nf, info, false ) == false )
-                {
-                    continue;
-                }
-                // pnp成功，将pnp结果加到graph中
-                cout<<"solve pnp ok, generating an edge"<<endl;
-                g2o::EdgeSE3* edge = new g2o::EdgeSE3();
-                edge->vertices()[0] = dynamic_cast<g2o::VertexSE3*> (optimizer.vertex( nf->id ));
-                edge->vertices()[1] = dynamic_cast<g2o::VertexSE3*> (optimizer.vertex( pf->id ));
-                edge->setMeasurement( info.T );
-                edge->setInformation( Eigen::Matrix<double,6,6>::Identity() * 100);
-                edge->setRobustKernel( new g2o::RobustKernelHuber() );
-                
-                edge->computeError();
-                cout<<"add local error "<<edge->chi2()<<endl;
-                localAccumulatedError += edge->chi2();
-                EdgeID id;
-                id[nf->id] = pf->id;
-                edges[ id ] = edge;
-                optimizer.addEdge( edge );
-                cout<<"edge has been added"<<endl;
-            }// end of for nearbyFrames
-
-            // nf 的回环检测
-            looper->add( nf );
-            vector<RGBDFrame::Ptr>  possibleLoops = looper->getPossibleLoops( nf );
-
-            for ( auto pf:possibleLoops )
-            {
-                if ( isEdgeExist( nf->id, pf->id ) ) //这条边已经存在
-                    continue;
-                PNP_INFORMATION info;
-                if ( pnp->solvePnPLazy( pf, nf, info, false) == true )
-                {
-                    g2o::EdgeSE3* edge = new g2o::EdgeSE3();
-                    edge->vertices()[0] = dynamic_cast<g2o::VertexSE3*> (optimizer.vertex( nf->id ));
-                    edge->vertices()[1] = dynamic_cast<g2o::VertexSE3*> (optimizer.vertex( pf->id ));
-                    edge->setMeasurement( info.T );
-                    edge->setInformation( Eigen::Matrix<double,6,6>::Identity() * 100);
-                    edge->setRobustKernel( new g2o::RobustKernelHuber() );
-                    //edges.push_back( edge );
-                    EdgeID id;
-                    id[nf->id] = pf->id;
-                    edges[ id ] = edge;
-                    optimizer.addEdge( edge );
-
-                    edge->computeError();
-                    loopAccumulatedError += edge->chi2();
-                }
-            } // end of for possible loops
-        } // end of for new frames
-
-        // 处理优化
-        bool doOptimize = false;
-        if ( loopAccumulatedError > loopAccuError )
-        {
-            // 处理全局优化
-            for ( auto v:vertexIdx )
-            {
-                optimizer.vertex(v)->setFixed(false);
-            }
-            optimizer.vertex( vertexIdx[0] )->setFixed(true);
-            cout<<"global optimization"<<endl;
-            optimizer.initializeOptimization();
-            optimizer.optimize(10);
-            // 重置keyframes和refFrame
-            for ( auto kf : keyframes )
-            {
-                g2o::VertexSE3* v = dynamic_cast<g2o::VertexSE3*> ( optimizer.vertex( kf->id ) );
-                if ( v )
-                {
-                    kf->setTransform( v->estimate().inverse());
-                }
-            }
-            localAccumulatedError = 0;
-            loopAccumulatedError  = 0;
-            doOptimize = true;
-        }
-        else if ( localAccumulatedError > localAccuError )
-        {
-            // 处理局部优化
-            for ( auto v:vertexIdx )
-            {
-                optimizer.vertex( v )->setFixed( true );
-            }
-            for ( int i=vertexIdx.size()-1; i>0 && i>vertexIdx.size()-6; i-- )
-            {
-                optimizer.vertex( vertexIdx[i] )->setFixed( false );
-            }
-            optimizer.vertex( vertexIdx[0] )->setFixed(true);
-            cout<<"local optimization"<<endl;
-            
-            optimizer.initializeOptimization();
-            optimizer.optimize(10);
-            // 重置
-            for ( int i=keyframes.size()-1; i>0 && i>keyframes.size()-6; i-- )
-            {
-                //cout<<"i="<<i<<", keyframe size="<<keyframes.size()<<endl;
-                g2o::VertexSE3* v = dynamic_cast<g2o::VertexSE3*> ( optimizer.vertex( keyframes[i]->id ) );
-                if ( v )
-                {
-                    keyframes[i]->setTransform( v->estimate().inverse() );
-                }
-                
-            }
-            localAccumulatedError = 0;
-            doOptimize = true;
-        } // end of if loop accu
-        
-        if ( doOptimize == true )
-        {
-            refFrame = keyframes.back();
-            tracker->adjust( refFrame );
-        }
-    }
-    cout<<"pose graph thread stops"<<endl;
-}
-
-// 根据自身保存的 帧 数组 对 当前传入的帧 进行相似性 检测==============================
+// 获取可能的loops=========================查找闭环==================
 vector<RGBDFrame::Ptr> Looper::getPossibleLoops( const RGBDFrame::Ptr& frame )
 {
-    vector<RGBDFrame::Ptr>  result;// 和当前帧具有相似性的 帧数组
-    for ( size_t i=0; i<frames.size(); i++ )// 遍例帧库
+    vector<RGBDFrame::Ptr>  result;
+    for ( size_t i=0; i<frames.size(); i++ )// 遍例闭环数据库 帧
     {
         RGBDFrame::Ptr pf = frames[i];
-        double  score = vocab.score( frame->bowVec, pf->bowVec );// 计算字典向量 相似性
-        if (score > min_sim_score && abs(pf->id - frame->id) > min_interval )
+        double  score = vocab.score( frame->bowVec, pf->bowVec );// 计算所给帧 和 数据库 帧 的相似性
+        if (score > min_sim_score && abs(pf->id-frame->id)>min_interval )// 比较相似 且 距离较远
         {
-            result.push_back( pf );
+            result.push_back( pf );// 与所给帧较相似==========
         }
     }
-    return result;// 返回相似性数组======
+    return result;
 }
 
 ```
-
-
-
-
 
 # 位姿图 优化 后端   全局优化===========
 pose_graph.h
@@ -2472,6 +2329,50 @@ void PoseGraph::mainLoop()
 
 ```
 
+
+> 全局 图优化 测试代码=====
+```c
+#include "track.h"
+#include "pose_graph.h"
+using namespace rgbd_tutor;
+
+int main()
+{
+    ParameterReader	parameterReader;
+    Tracker::Ptr	tracker( new Tracker(parameterReader) );// 跟踪器指针=====
+    FrameReader		frameReader( parameterReader );
+    PoseGraph		poseGraph( parameterReader, tracker );
+
+    while( RGBDFrame::Ptr frame = frameReader.next() )
+    {
+        cout<<"*******************************************"<<endl;
+        boost::timer timer;
+        cout<<"loading frame "<<frame->id<<endl;
+        Eigen::Isometry3d T = tracker->updateFrame( frame );// 跟踪器 进行跟踪=====
+        cout<<"current frame T = "<<endl<<T.matrix()<<endl; 
+        cv::imshow( "image", frame->rgb );
+        if ( poseGraph.tryInsertKeyFrame( frame ) == true )// 在图中插入一帧========
+        {
+            cout<<"Insert key-frame succeed"<<endl;
+            cv::waitKey(1);
+        }
+        else
+        {
+            cout<<"Insert key-frame failed"<<endl;
+            cv::waitKey(1);
+        }
+        cout<<GREEN<<"time cost="<<timer.elapsed()<<RESET<<endl;
+    }
+
+    poseGraph.shutdown();
+    return 0;
+}
+
+
+```
+
+
+
 # 地图构建
 > mapper.h
 ```
@@ -2643,6 +2544,53 @@ void Mapper::viewer()
 
 
 ```
+
+
+> 地图构建测试
+```c
+#include "rgbdframe.h"
+#include "track.h"
+#include "pose_graph.h"
+#include "mapper.h"
+#include "common_headers.h"
+
+
+using namespace std;
+using namespace rgbd_tutor;
+int main()
+{
+    ParameterReader	parameterReader;
+    Tracker::Ptr	tracker( new Tracker(parameterReader) ); // 跟踪器指针
+    FrameReader		frameReader( parameterReader );
+    PoseGraph		poseGraph( parameterReader, tracker );   // 图优化
+    Mapper			mapper( parameterReader, poseGraph );// 建图
+
+    while ( RGBDFrame::Ptr frame = frameReader.next() )
+    {
+        boost::timer timer;
+        cv::imshow("image", frame->rgb);
+        cv::waitKey(1);
+        tracker->updateFrame( frame ); // 跟踪
+        poseGraph.tryInsertKeyFrame( frame );// 图优化插入
+        
+        if (tracker->getState() == Tracker::LOST)
+        {
+            cout<<"tracker is lost"<<endl;
+            //break;
+        }
+        cout<<"cost time = "<<timer.elapsed()<<endl;
+    }
+
+    poseGraph.shutdown();
+    mapper.shutdown();
+
+    return 0;
+}
+
+```
+
+
+
 
 
 
