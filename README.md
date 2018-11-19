@@ -1401,25 +1401,25 @@ bool rgbd_tutor::PnPSolver::solvePnPLazy( const rgbd_tutor::RGBDFrame::Ptr & fra
 
 #include <thread>   // 线程
 #include <mutex>    // 锁
-#include <functional>
+#include <functional>// 用于表示函数对象(function object)的类模板
 
 using namespace rgbd_tutor;
 
 namespace rgbd_tutor 
 {
 
-class PoseGraph;
+class PoseGraph; // 使用位姿图 进行优化
 
 class Tracker
 {
     
 public:
-    typedef shared_ptr<Tracker> Ptr;
-    enum    trackerState
+    typedef shared_ptr<Tracker> Ptr; // 跟踪类 共享智能指针
+    enum    trackerState // 跟踪状态
     {
-        NOT_READY=0,
-        OK,
-        LOST
+        NOT_READY=0, // 未准备好
+        OK,          // 跟踪正常
+        LOST         // 跟踪丢失
     };
 
 public:
@@ -1427,34 +1427,36 @@ public:
     Tracker( const rgbd_tutor::ParameterReader para ) :
         parameterReader( para )
     {
-        orb = make_shared<rgbd_tutor::OrbFeature> (para);
-        pnp = make_shared<rgbd_tutor::PnPSolver> (para, *orb);
-        max_lost_frame = para.getData<int>("tracker_max_lost_frame");
-        refFramesSize = para.getData<int>("tracker_ref_frames");
+        orb = make_shared<rgbd_tutor::OrbFeature> (para);   // 特征点 提取 匹配
+        pnp = make_shared<rgbd_tutor::PnPSolver> (para, *orb);// 位姿求解
+        max_lost_frame = para.getData<int>("tracker_max_lost_frame");// 丢失情况判断阈值
+        refFramesSize = para.getData<int>("tracker_ref_frames");     // 参考帧队列大小
     }
 
     void setPoseGraph( shared_ptr<PoseGraph> poseGraph_ )
     {
-        this->poseGraph = poseGraph_;
+        this->poseGraph = poseGraph_; // 设置位姿图优化 对象指针============
     }
     //  放入一个新帧，返回此帧所在的姿态
     Eigen::Isometry3d    updateFrame( RGBDFrame::Ptr& newFrame );
 
-    trackerState getState() const { return state; }
+    trackerState getState() const { return state; } // 返回跟踪器状态=======
 
     // adjust the frame according to the given ref frame
+    // 应该是用于 本帧丢失时，尝试对本帧进行重定位===============================
+    // 根据所给参考帧对本帧进行位姿跟踪，设置位姿================================
     bool    adjust( const RGBDFrame::Ptr& ref )
     {
-        unique_lock<mutex> lck(adjustMutex);
+        unique_lock<mutex> lck(adjustMutex);// 其他线程 会读取，需要改变 数据，对数据进行上锁========
         cout<<"adjust frame frame "<<ref->id<<" to "<<currentFrame->id<<endl;
         PNP_INFORMATION info;
-        if (pnp->solvePnPLazy( ref, currentFrame, info) == true)
+        if (pnp->solvePnPLazy( ref, currentFrame, info) == true)// 和参考帧进行匹配 g2o优化求解位
         {
-            currentFrame->setTransform( info.T*ref->getTransform() );
-            refFrames.clear();
-            refFrames.push_back(ref);
-            cntLost = 0; 
-            state = OK;
+            currentFrame->setTransform( info.T*ref->getTransform() );// 设置全局位姿
+            refFrames.clear();// 队列清空
+            refFrames.push_back(ref);// 加入参考帧
+            cntLost = 0; // 丢失计数清零
+            state = OK;  // 跟踪状态 ok
             cout<<"adjust ok"<<endl;
             return true;
         }
@@ -1476,11 +1478,11 @@ protected:
     // 数据
 
     // 当前帧
-    rgbd_tutor::RGBDFrame::Ptr  currentFrame    =nullptr;
+    rgbd_tutor::RGBDFrame::Ptr  currentFrame    =nullptr;// 当前帧指针
 
     // 当前帧的参考帧
     // 队列结构，长度固定
-    deque< RGBDFrame::Ptr >  refFrames;
+    deque< RGBDFrame::Ptr >  refFrames; // 参考帧 指针 队列 
     int refFramesSize   =5;
     Eigen::Isometry3d   lastPose = Eigen::Isometry3d::Identity();
     
@@ -1498,23 +1500,144 @@ protected:
     int     max_lost_frame  =5;
 
     // pose graph 
-    shared_ptr<PoseGraph>   poseGraph =nullptr;
-    mutex   adjustMutex;
+    shared_ptr<PoseGraph>   poseGraph =nullptr;// 位姿图优化 对象指针
+    mutex   adjustMutex; // 调整 锁
 
 protected:
     // 其他用途
-    shared_ptr<rgbd_tutor::PnPSolver>   pnp;
-    shared_ptr<rgbd_tutor::OrbFeature>  orb;
+    shared_ptr<rgbd_tutor::PnPSolver>   pnp;// 位姿求解
+    shared_ptr<rgbd_tutor::OrbFeature>  orb;// 特征点 提取 匹配 
 
 };
 
 }
-
-
-
 #endif // TRACK_H
 
 ```
+
+> 跟踪类 实现
+```c
+#include "track.h"
+#include <unistd.h>
+
+// tracker的主线程
+using namespace rgbd_tutor;
+
+// 处理新的一帧============================================================
+Eigen::Isometry3d    Tracker::updateFrame( RGBDFrame::Ptr& newFrame )
+{
+    unique_lock<mutex> lck(adjustMutex); // 上锁======
+    currentFrame = newFrame;// 更新为当前帧=====
+    if ( state == NOT_READY ) // 1. 进行初始化
+    {
+        initFirstFrame( );// 初始化第一帧====成功会改变跟踪状态=========
+        return Eigen::Isometry3d::Identity(); // 初始帧作为世界坐标系
+    }
+    if ( state == OK )// 2. 跟踪正常
+    {
+        trackRefFrame();// 跟踪参考帧===设置当前帧的位姿=====
+        return currentFrame->getTransform();// 返回当前帧的位姿=====
+    }
+    
+    // state = LOST  3. 位置丢失
+    lostRecover();// 进行重定位==============
+    return currentFrame->getTransform();
+
+}
+
+// 初始化第一帧=============
+void    Tracker::initFirstFrame( )
+{
+    orb->detectFeatures( currentFrame ); // 特征点检测
+    refFrames.push_back(currentFrame);   // 加入参考帧队列======
+    speed = Eigen::Isometry3d::Identity();// 设置速度
+    state = OK;                           // 切换 跟踪器状态
+}
+
+void    Tracker::trackRefFrame()
+{
+    //adjustMutex.lock();
+    
+    // 初始值 ===== 这里加速速度恒定，使用 速度(位姿差) *上一参考帧  当前帧位姿初始值====
+    currentFrame->setTransform( speed * refFrames.back()->getTransform() );
+    orb->detectFeatures( currentFrame );// 检测当前帧 特征点
+    
+    // 使用 参考帧队列中的帧 进行 局部地图跟踪===============================
+    // build local BA
+    vector<cv::Point3f> obj;// 3d点
+    vector<cv::Point2f> img;// 2d点
+    for (auto pFrame: refFrames)// 参考帧队列中的每一帧 
+    {
+        vector<cv::DMatch> matches = orb->match( pFrame, currentFrame );// 当前帧和参考帧进行特征点描述子匹配
+        vector<cv::DMatch>  validMatches;
+        Eigen::Isometry3d invPose = pFrame->getTransform().inverse();
+	// 参考帧坐标逆变换，用于将帧坐标系下的3d点变换到世界坐标下============!!!!!!!!!!!!!!!!!!
+	
+        for (auto m:matches)
+        {
+            cv::Point3f pObj = pFrame->features[m.queryIdx].position;// 参考帧对应 坐标系下的3d点
+            if (pObj == cv::Point3f(0,0,0))
+                continue;// 该3d点不存在
+            Eigen::Vector4d vec = invPose * Eigen::Vector4d(pObj.x, pObj.y, pObj.z,1 );// 逆变换到世界坐标系下========
+            obj.push_back( cv::Point3f(vec(0), vec(1), vec(2) ) ); // 参考帧世界坐标系 3d点
+            img.push_back( currentFrame->features[m.trainIdx].keypoint.pt );// 当前帧 2d像素点
+        }
+    }
+    
+    if ( img.size() < 15 )// 总的匹配点数量过少，有可能丢失了
+    {
+        cntLost ++;// 丢失计数
+        if (cntLost > max_lost_frame)
+        {// 如果 大于 最大丢失计数，则认为i真的更丢了，更新 跟踪器状态，需要进行重定位了
+            state = LOST;//更新 跟踪器状态
+        }
+        return;// 匹配点数量少，直接返回 ====================
+    }
+    
+    vector<int> inlierIndex;
+    Eigen::Isometry3d T = speed * lastPose;// 相对世界坐标系的位姿
+    bool b = pnp->solvePnP( img, obj, currentFrame->camera, inlierIndex, T );
+    if ( inlierIndex.size() < 15 ) // pnp 求解 内点数量过少，匹配效果也不好
+    {
+        cntLost ++;// 丢失计数===================
+        if (cntLost > max_lost_frame)
+        {
+            state = LOST;
+        }
+        return;
+    }
+    
+    currentFrame->setTransform( T );// 设置当前帧位姿态
+    cntLost = 0;
+    speed = T * lastPose.inverse();// 当前帧 到 世界坐标系 到 上一帧 ，两帧位姿差======
+    lastPose = currentFrame->getTransform(); // 更新 上一帧的速度=============
+    refFrames.push_back( currentFrame );     // 加入参考帧 队列
+    
+    while (refFrames.size() > refFramesSize ) // 查看参考帧队列容量，保持最近的几帧
+    {
+        refFrames.pop_front();// 丢弃 旧的=======
+    }
+    
+    //cout<<"speed="<<endl<<speed.matrix()<<endl;
+}
+
+// 丢失后进行 重定位=============直接设置为上一参考帧位姿，后进行初始化===============
+void    Tracker::lostRecover()
+{
+    cout<<"trying to recover from lost"<<endl;
+    orb->detectFeatures( currentFrame );// 当前帧 特征检测
+    currentFrame->setTransform( refFrames.back()->getTransform() );// 设置位姿为上一帧参考帧 的位姿
+    refFrames.clear();// 参考帧队列清空
+    refFrames.push_back( currentFrame );// 放入最新的一帧
+    state = OK; // 相当于重新初始化了=========================
+    cntLost = 0;
+    cout<<"recover returned"<<endl;
+}
+
+
+
+```
+
 
 
 
